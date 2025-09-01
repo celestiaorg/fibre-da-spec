@@ -1,6 +1,4 @@
-# FibreDA — Full Specification v1.2 (client & server)
-
-> This revision updates parameters so that **original rows (K)** are **2¹² = 4096** (not total). All derived values and examples are adjusted accordingly, while preserving the prior v1.1 design changes (Pre-Payment, no promotion, permutation-based non-overlapping assignment).
+# FibreDA — Full Specification v1 (client & server)
 
 ---
 
@@ -9,10 +7,10 @@
 * **FSP**: Fibre Service Provider — a validator-operated server storing its assigned rows.
 * **Row**: a fixed **index** in the codeword; total rows per blob are **N = K + parity = 4K = 16384**. Each row is a fixed-length chunk for a given blob; **row size is variable** per blob but must be a **multiple of 64 bytes**.
 * **Commitment**: `SHA256(rowRoot || rlcRoot)`.
-* **RLC**/**rlc\_orig**: GF(2¹²⁸) vector used for rsema1d **Context-Based Verification**.
+* **RLC**/**rlc\_orig**: GF(2¹²⁸) vector used for rsema1d encoding correctness verification; 
 * **Pre-Payment (PrePay)**: **on-chain pre-payment transaction** that the client submits **first**; servers verify **inclusion** (by tx hash + inclusion height) and only then accept data.
 * **Attestation**: validator signature binding acceptance (with prepay reference) to the commitment and retention horizon.
-* **Assignment** (formerly “ShardMap”): deterministic **permutation-based** mapping from (commitment, **valset\@height**, validator) → **non-overlapping** set of row indices.
+* **Assignment**: deterministic **permutation-based** mapping from (commitment, **valset\@height**, validator) → **non-overlapping** set of row indices.
 
 ---
 
@@ -70,8 +68,7 @@
 * **Bulk vs Streaming**: **Bulk** remains v1 default; **Streaming** is recommended when `rows_per_val × row_size` is large or middleboxes enforce small frames. (§6)
 * **Library-first** in v1 to simplify testing/ops; **Light-node** mode later. (§4)
 * **ValTracker** fetches **valset at a specific height** to anchor assignment. (§4.2)
-* **Concurrency**: run **rsema1d** and ValTracker **in parallel**. (§4.3)
-* **Server verification**: pipeline **Pre-Payment inclusion check → row proof → RLC context → assignment check → persist → sign**. (§8.3)
+* **Server verification**: pipeline **Pre-Payment inclusion check → row proof → RLC vrification → assignment check → persist → sign**. (§8.3)
 * **No promotion**: storage uses a single **retention TTL**; **Refresh** resubmits **Pre-Payment** to extend. (§5.3)
 * **Backpressure**: retain conservative **20 MiB/s** cap; actual RPS depends on `row_size`. (§8.5)
 
@@ -148,7 +145,7 @@ type Client interface {
 0. Bounds: `0 < len(data) ≤ 128 MiB`.
 1. **Pre-Payment**: submit and await inclusion; obtain `(prepay_tx_hash, prepay_block_height)`.
 2. **Valset**: `vals, vals_height := vt.CurrentSet(ctx)`.
-3. **Encode** (parallel with 2): rsema1d chooses `row_size` (64 B multiple), computes `commitment`, `rlc_orig`, and produces `rows[]`, `proofs[]`. (**K=4096, N=16384**).
+3. **Encode**: rsema1d chooses `row_size` (64 B multiple), computes `commitment`, `rlc_orig`, and produces `rows[]`, `proofs[]`. (**K=4096, N=16384**).
 4. **Plan**: `assign := Assignment(commitment, vals)` as per §4.5.
 5. **Upload bulk** (parallel per FSP; ≤ `send_workers`):
    `UploadRowsRequest{commitment, rlc_orig, rows subset+proofs, valset_height, prepay_tx_hash, prepay_block_height, original_length?}`.
@@ -278,7 +275,7 @@ service FibreStreaming { rpc Upload(stream UploadReq) returns (UploadResp); }
 
 ## 7) Attestations (sign/verify)
 
-**Preimage (v2)**
+**Preimage (v1)**
 
 ```
 sign_bytes = sha256(
@@ -286,10 +283,11 @@ sign_bytes = sha256(
   commitment ||
   chain_id ||
   be64(prepay_block_height) ||
+  prepay_tx_hash 
 )
 ```
 
-* Binds to network (`chain_id`)  and **expiry** based on pre-payment height (single TTL; no promotion).
+* Binds to network (`chain_id`)  and **expiry** based on pre-payment height.
 
 **Server**
 
@@ -334,9 +332,9 @@ type Store interface {
 ### 8.3 Upload verification pipeline (mandatory)
 
 1. **Pre-Payment inclusion**: verify `(prepay_tx_hash, prepay_block_height)` on-chain. Verify that `prepay_block_height.timestamp + retention_ttl > now`.
-2. Build **rsema1d verification context** from `rlc_orig`.
+2. Build **RLC** from `rlc_orig`. Verify correct encodind and proof of RLC.
 3. **Assignment check**: recompute **Assignment(commitment, valset\@valset\_height)**; ensure incoming row indices are exactly this validator’s slice (no extras/dupes).
-4. For each row: verify **Merkle proof** against `commitment` and **Context-Based Verification** (RLC).
+4. For each row: verify **Merkle proof** against `commitment` and encoding against **RLC** coefficients.
 5. Persist rows with `expiry = prepay_block_height.timestamp + retention_ttl` (write + sync).
 6. **Sign**  and return **attestation**.
 
@@ -361,8 +359,8 @@ type Store interface {
 ## 9) Security considerations
 
 * **Receipt domain** (`"FIBRE/v1"`) prevents cross-protocol replay.
-* **Chain binding**: `chain_id`, `prepay_block_height`, bind acceptance to a concrete chain state.
-* **Row verification** includes **Context-Based Verification** (RLC), preventing malleability via valid-looking but undecodable rows.
+* **Chain binding**: `chain_id`, `prepay_block_height`,`prepay_tx_hash`  bind acceptance to a concrete chain state.
+* **Row verification** includes **RLC**, preventing malleability via valid-looking but undecodable rows.
 * **Non-overlapping assignment** removes ambiguity about which FSP should store which rows.
 
 ---
@@ -377,7 +375,7 @@ type Store interface {
 
 ## 12) Testing plan
 
-**Unit**: Assignment determinism given `(commitment, valset@height)`; RLC context verification; attestation digest vectors; **row\_size rounding** (64 B multiple) with **K=4096**.
+**Unit**: Assignment determinism given `(commitment, valset@height)`; RLC verification; attestation digest vectors; **row\_size rounding** (64 B multiple) with **K=4096**.
 
 **Integration**: end-to-end Put/Get/Refresh with N mock FSPs; prepay inclusion verification (happy & failure paths); assignment mismatch rejections; failure injection (missing rows, wrong proofs).
 
@@ -397,7 +395,7 @@ const domain = "FIBRE/v1"
 
 func Digest(
   commitment [32]byte, chainID string, valsetHeight uint64,
-  prepayTxHash [32]byte, prepayBlockHeight uint64, expiryEpochMinute uint64,
+  prepayTxHash [32]byte, prepayBlockHeight uint64, prepayTxHash []byte,
 ) [32]byte {
   // sha256(domain || commitment || chainID ||  be64(prepayBlockHeight))
 }
@@ -497,7 +495,7 @@ mode = "library"                      # or "light-node"
 valtracker = "lazy"                   # or "active"
 
 [server]
-retention_ttl = "24h"                 # single TTL; no promotion
+retention_ttl = "24h"                 # time to live; no promotion
 rows_per_message_limit = 165          # e.g., ceil(16384 / 100) + 1
 throughput_cap_bytes_per_sec = 10485760  # 10 MiB/s
 
