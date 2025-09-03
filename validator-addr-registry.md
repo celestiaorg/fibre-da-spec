@@ -1,8 +1,8 @@
-# Validator Address Registry Specification
+# Validator Address Registry
 
 ## Abstract
 
-The `x/valaddr` module enables validators in the active set to register and manage their fibre service provider information.
+The `x/valaddr` module enables validators in the active set to register their fibre service provider information.
 
 ## Contents
 
