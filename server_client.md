@@ -11,7 +11,7 @@
 * **Row**: a fixed **index** in the codeword; total rows per blob are **N = K + parity = 4K = 16384**. Each row is a fixed‑length chunk; **row size is variable** per blob but must be a **multiple of 64 bytes**.
 * **Commitment**: `SHA256(rowRoot || rlcRoot)`.
 * **RLC / rlc\_orig**: GF(2¹²⁸) vector used for rs-ema1d encoding correctness verification; length **N** (16 bytes each ⇒ **\~256 KiB** total).
-* **PaymentPromise**: off‑chain, escrow‑funded **payment authorization** signed by the escrow owner (per `x/fibre`). Carries `{owner, namespace(v2), blob_size, commitment, row_version, creation_height, signature}`.
+* **PaymentPromise (PP)**: off‑chain, escrow‑funded **payment authorization** signed by the escrow owner (per `x/fibre`). Carries `{owner, namespace(v2), blob_size, commitment, row_version, creation_height, signature}`.
 * **Validator signatures**: ed25519 signatures by validators over the **commitment** (used in `MsgPayForFibre`).
 * **Attestation / Receipt** (off‑chain): optional server‑signed receipt (domain‑separated), including **expiry** (TTL) for UX; not used on‑chain.
 * **Assignment**: deterministic **permutation‑based** mapping from `(commitment, valset@height)` to **non‑overlapping** row indices per validator.
@@ -55,7 +55,7 @@
 
 **Server retention & limits**
 
-* `retention_ttl = 24h` (single horizon; **no promotion**).
+* `retention_ttl = 24h`.
 * `server_rows_per_message_limit ≈ ceil(N / val_set_size) + 1` (guard rail).
 * **Throughput**: `val_throughput ≈ 20 MiB/s` (configurable).
 
@@ -102,12 +102,10 @@ NewClientWithLibrary(cfg LibraryConfig, vtMode ValTrackerMode, opts ...Option) (
 
 * `ChainID string` // used in validator signature preimage
 * `EscrowOwner string` // bech32
-* `AutoPay bool`  // default true
-* `AutoFund bool` // optional; fund escrow on insufficient balance with policy
+* `AutoFund int` // optional; fund escrow on insufficient balance with policy. Client auto funds escrow via `MsgDepositToEscrow` if needed with this amount
 
 **Options**
 * `WithSendWorkers(int)`, `WithReadWorkers(int)` // concurrency settings
-* `WithAutoFunding(int)`          // (after v1) if set, client auto funds escrow via `MsgFundPaymentPromise` if needed with this amount
 
 ### 4.2 Balance bootstrap and reconciliation 
 
@@ -115,8 +113,11 @@ On initialization the client **must**:
 
 1. Query via DFSP **EscrowAccount( EscrowOwner )** and cache `available_balance@height₀`.
    2. If DFSP is down, query any FSP.
-2. Acknowledge cache may be **stale** due to previous run submissions.
-3. **Verify server feedback** on iduring upload, DFSP (or the rejecting FSP) must return `InsufficientBalanceProof` (see §5.4). Upon such proof:
+2. If Escrow does not exist, client **must** create it via `MsgCreateEscrow` (with optional initial deposit) and wait for inclusion + state proof (see §5.5).
+3. If AutoFund is enabled, client may create with `initial_deposit = AutoFund` to avoid immediate top-up.
+
+On each **Put()** or **Refresh()**:
+* **Verify server feedback** during upload, DFSP (or the rejecting FSP) must return `InsufficientBalanceProof` (see §5.4). Upon such proof:
 
     * Update local cached balance to `available_balance@proof_height`.
     * Track **pending promises** returned by server (those not settled yet).
