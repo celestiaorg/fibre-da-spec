@@ -4,28 +4,32 @@
 
 ## 0) Glossary
 
-* **FSP**: Fibre Service Provider — a validator-operated server storing its assigned rows.
-* **Row**: a fixed **index** in the codeword; total rows per blob are **N = K + parity = 4K = 16384**. Each row is a fixed-length chunk for a given blob; **row size is variable** per blob but must be a **multiple of 64 bytes**.
+* **FSP**: Fibre Service Provider — a validator‑operated server storing its assigned rows.
+* **Default FSP** (DFSP): a preferred validator/FSP endpoint the client uses for unary interactions that do not require quorum:
+  * Escrow balance queries / proofs 
+  * SubmitPayForFibre (relay of MsgPayForFibre)
+* **Row**: a fixed **index** in the codeword; total rows per blob are **N = K + parity = 4K = 16384**. Each row is a fixed‑length chunk; **row size is variable** per blob but must be a **multiple of 64 bytes**.
 * **Commitment**: `SHA256(rowRoot || rlcRoot)`.
-* **RLC**/**rlc\_orig**: GF(2¹²⁸) vector used for rsema1d encoding correctness verification; 
-* **Pre-Payment (PrePay)**: **on-chain pre-payment transaction** that the client submits **first**; servers verify **inclusion** (by tx hash + inclusion height) and only then accept data.
-* **Attestation**: validator signature binding acceptance (with prepay reference) to the commitment and retention horizon.
-* **Assignment**: deterministic **permutation-based** mapping from (commitment, **valset\@height**, validator) → **non-overlapping** set of row indices.
+* **RLC / rlc\_orig**: GF(2¹²⁸) vector used for rs-ema1d encoding correctness verification; length **N** (16 bytes each ⇒ **\~256 KiB** total).
+* **PaymentPromise**: off‑chain, escrow‑funded **payment authorization** signed by the escrow owner (per `x/fibre`). Carries `{owner, namespace(v2), blob_size, commitment, row_version, creation_height, signature}`.
+* **Validator signatures**: ed25519 signatures by validators over the **commitment** (used in `MsgPayForFibre`).
+* **Attestation / Receipt** (off‑chain): optional server‑signed receipt (domain‑separated), including **expiry** (TTL) for UX; not used on‑chain.
+* **Assignment**: deterministic **permutation‑based** mapping from `(commitment, valset@height)` to **non‑overlapping** row indices per validator.
 
 ---
 
-## 1) Goals & non-goals
+## 1) Goals & scope of v1
 
 **Goals**
 
-1. Encode a blob into **K = 4096 original rows** with **encoding factor 1:3** (3K parity; **N = 16384** total rows), **shard** (non-overlapping) across FSPs via permutation assignment, and collect ≥ 2/3 **attestations** by count and voting power.
-2. **Require Pre-Payment** on-chain **before upload**. Client supplies `(prepay_tx_hash, prepay_block_height)` and a `valset_height`. Servers **verify inclusion** and accept only if paid.
-3. Provide **bulk** upload path for v1 (simple), with **streaming** available if per-FSP payloads are large or proxies enforce small limits (§6).
-4. Keep v1 client **library-first**; support a **light-node** mode later.
+1. Encode blob into **K = 4096** originals, parity **3K**, **N = 16384**, shard via Assignment, collect ≥ 2/3 validator signatures by **count and voting power**.
+2. Servers accept data **only** if `PaymentPromise` validates; they **sign** the attestation preimage above and store rows.
+3. Provide **Bulk** upload (default) and **Streaming** upload for early rejection & backpressure.
+4. **Library‑first** client; optional **light‑node** later.
 
-**Non-goals (v1)**
-
-* Shipping a SQL or custom epoch-bucket store; v1 is **Badger-only**. We will test SQL-light and epoch-bucket variants later and choose by measured performance.
+**Improvements (after v1)**
+* Shipping SQL or epoch‑bucket variants; v1 is **Badger‑only** (evaluate based on performance later).
+* Allow **streaming** where per‑FSP payloads are large (§6) to allow fast return from server.
 
 ---
 
@@ -46,6 +50,8 @@
 | `val_set_size`      |                      **100** | Planning default; runtime uses actual (from `valset_height`).                                        |
 | `rows_per_val`      | `≈ ceil(N / V)` (even split) | With V=100 ⇒ **163 or 164** rows/validator (first `r=84` get 164; others 163).                       |
 | `rlc_orig_size`     |                  **256 KiB** | `16 * N = 16 * 16384` bytes of GF128 coeffs.                                                         |
+| `retention_ttl`                 |                 24 h | Single horizon; **promotion disabled**. **Refresh** can extend (§5.3).                  |         |                               |
+| **Throughput**                  |           \~20 MiB/s | Configurable.                                                                           |         |                               |
 
 **Server retention & limits**
 
@@ -65,12 +71,18 @@
 
 ## 3) Design decisions (summary)
 
-* **Bulk vs Streaming**: **Bulk** remains v1 default; **Streaming** is recommended when `rows_per_val × row_size` is large or middleboxes enforce small frames. (§6)
-* **Library-first** in v1 to simplify testing/ops; **Light-node** mode later. (§4)
-* **ValTracker** fetches **valset at a specific height** to anchor assignment. (§4.2)
-* **Server verification**: pipeline **Pre-Payment inclusion check → row proof → RLC vrification → assignment check → persist → sign**. (§8.3)
-* **No promotion**: storage uses a single **retention TTL**; **Refresh** resubmits **Pre-Payment** to extend. (§5.3)
-* **Backpressure**: retain conservative **20 MiB/s** cap; actual RPS depends on `row_size`. (§8.5)
+* **Payment‑gated upload.** Server calls `QueryValidatePaymentPromise(PP)`. If valid & sufficient funds (or provably insufficient—see §5.4), proceed.
+* **Unified attestation/signature.** FSP returns a single **validator signature** over:
+
+  ```
+  preimage = "FIBRE/v1" || commitment || chain_id || be64(posted_block_height)
+  with posted_block_height := PP.creation_height (v1.2)
+  ```
+
+  Client aggregates ≥2/3 and submits `MsgPayForFibre{promise, validator_signatures}`.
+* **Refresh (no re‑upload).** New PP for the **same commitment**, collect signatures again, submit `MsgPayForFibre`.
+* **Assignment.** “Permute validators” is **OPTIONAL** to improve randomness (unclear if required).
+* **Streaming rationale.** Server can **reject early** after validating **commitment** (dedup/existence) and **PaymentPromise** **before** reading large row payloads (§6.2).
 
 ---
 
@@ -79,62 +91,86 @@
 ### 4.1 Construction & config
 
 ```go
-// Light-node backed (headers/valsets available; best for Active mode):
+// Light-node backed (headers/valsets available)
 NewClientWithLightNode(cfg LightNodeConfig, vtMode ValTrackerMode, opts ...Option) (*Client, error)
 
-// Library-first (preferred v1; no local sync/storage; ValTracker defaults to Lazy):
+// Library-first (preferred v1)
 NewClientWithLibrary(cfg LibraryConfig, vtMode ValTrackerMode, opts ...Option) (*Client, error)
 ```
 
-**Options**:
-`WithSendWorkers(int)`, `WithReadWorkers(int)`, `WithAssignment(Assignment)`,
-`WithPrepaySubmitter(PrepaySubmitter)`, `WithDialer(Dialer)`.
+**Key config fields**
 
-### 4.2 ValTracker (Active vs Lazy)
+* `ChainID string` // used in validator signature preimage
+* `EscrowOwner string` // bech32
+* `AutoPay bool`  // default true
+* `AutoFund bool` // optional; fund escrow on insufficient balance with policy
 
-* **Inputs**: `HeaderService` / `ValSetService` to fetch **validator set at a given height**; **Provider Records Server** for FSP endpoints.
-* **Active Mode**: subscribe to chain heads; cache valsets; refresh endpoints/pools on changes.
-* **Lazy Mode**: resolve on demand (`Put/Get/Refresh`).
+**Options**
+* `WithSendWorkers(int)`, `WithReadWorkers(int)` // concurrency settings
+* `WithAutoFunding(int)`          // (after v1) if set, client auto funds escrow via `MsgFundPaymentPromise` if needed with this amount
+
+### 4.2 Balance bootstrap and reconciliation 
+
+On initialization the client **must**:
+
+1. Query via DFSP **EscrowAccount( EscrowOwner )** and cache `available_balance@height₀`.
+   2. If DFSP is down, query any FSP.
+2. Acknowledge cache may be **stale** due to previous run submissions.
+3. **Verify server feedback** on iduring upload, DFSP (or the rejecting FSP) must return `InsufficientBalanceProof` (see §5.4). Upon such proof:
+
+    * Update local cached balance to `available_balance@proof_height`.
+    * Track **pending promises** returned by server (those not settled yet).
+    * If **AutoFund** is enabled, **fund (deposit)** the escrow to cover shortfall, verify tx inclusion + state proof (see §5.5), then retry upload.
+
+### 4.3 Public API (client)
 
 ```go
-type ValInfo struct { PubKey []byte; VotingPow uint64; Address string }
-
-type ValTracker interface {
-  ActiveSetAt(ctx context.Context, height uint64) ([]ValInfo, error)
-  CurrentSet(ctx context.Context) ([]ValInfo, height uint64, error)
+type Namespace struct {
+  Version uint8  // MUST be 2
+  Bytes   [29]byte
 }
-```
 
-### 4.3 Public API
+type PutResult struct {
+  Commitment [32]byte
+  ValidatorSignatures [][]byte // ed25519 over preimage (see §7)
+  CreationHeight uint64        // == PP.creation_height
+  TTL *time.Time               // optional (server-provided info)
+}
 
-```go
-type PrepayRef struct {
-  TxHash [32]byte
-  BlockHeight uint64 // inclusion height
+type PFFConfirmation struct {
+  TxHash  string   // tx hash of MsgPayForFibre
+  Height  uint64   // inclusion height
+}
+
+type FundingTxResult struct {
+  TxHash       string
+  InclusionHeight uint64
+  InclusionProof []byte   // chain inclusion proof (e.g., tx-proof)
+  NewAvailableBalance string // coin string
+  BalanceProofHeight uint64
+  BalanceStateProof  []byte  // app-specific proof
 }
 
 type Client interface {
-  Put(ctx context.Context, data []byte, prepay PrepayRef) (commitment [32]byte, err error)
-  Get(ctx context.Context, commitment [32]byte, originalLength uint64) ([]byte, error)
-  Refresh(ctx context.Context, commitment [32]byte, prepay PrepayRef) (err error) // Pre-Payment resubmission only
+  // Construct PP internally, upload, aggregate sigs, and submit MsgPayForFibre.
+  Put(ctx context.Context, data []byte, ns Namespace) (PutResult, PFFConfirmation, error)
+
+  // Same as Put but returns signatures without submitting on-chain.
+  PutWithoutPFF(ctx context.Context, data []byte, ns Namespace) (PutResult, error)
+
+  // Provide creation height if known; if 0, client will fetch from FSP metadata.
+  Get(ctx context.Context, commitment [32]byte, creationHeight uint64, originalLength uint64) ([]byte, error)
+
+  // Refresh retention for the same commitment (no row upload).
+  Refresh(ctx context.Context, commitment [32]byte, ns Namespace, creationHeight uint64) (PutResult, error)
+
+  // ---- Funding API (manual) ----
+  CreateEscrow(ctx context.Context, initialDeposit string) (FundingTxResult, error)
+  DepositToEscrow(ctx context.Context, amount string) (FundingTxResult, error)
+  RequestWithdrawal(ctx context.Context, amount string) (FundingTxResult, error)
+  ClaimWithdrawal(ctx context.Context, requestedAt uint64) (FundingTxResult, error)
 }
 ```
-
-### 4.5 Assignment (non-overlapping; permutation-based)
-
-**Inputs**:
-`seed = commitment`, total shares `n = N = 16384`, validators `k = |valset@height|`.
-
-**Algorithm**
-
-1. **Permute shares**: sort share indices `i` by `SHA256("share" || seed || u32be(i))`.
-2. **Index validators** by public key (e.g., lexicographic `PubKey` bytes), giving indices `j = 0..k-1`.
-3. **Permute validators**: sort validator indices `j` by `SHA256("validator" || seed || u32be(j))`.
-4. `base = n // k`, `r = n % k`.
-   First `r` validators in the permuted order get `base+1` shares; the rest get `base`.
-5. Walk the permuted share list in order, handing out contiguous blocks to validators in the permuted order.
-
-**Properties**: **Non-overlapping**, **even** split, reproducible from `(commitment, valset@height)`.
 
 ---
 
@@ -142,93 +178,124 @@ type Client interface {
 
 ### 5.1 Put()
 
-0. Bounds: `0 < len(data) ≤ 128 MiB`.
-1. **Pre-Payment**: submit and await inclusion; obtain `(prepay_tx_hash, prepay_block_height)`.
-2. **Valset**: `vals, vals_height := vt.CurrentSet(ctx)`.
-3. **Encode**: rsema1d chooses `row_size` (64 B multiple), computes `commitment`, `rlc_orig`, and produces `rows[]`, `proofs[]`. (**K=4096, N=16384**).
-4. **Plan**: `assign := Assignment(commitment, vals)` as per §4.5.
-5. **Upload bulk** (parallel per FSP; ≤ `send_workers`):
-   `UploadRowsRequest{commitment, rlc_orig, rows subset+proofs, valset_height, prepay_tx_hash, prepay_block_height, original_length?}`.
-6. Collect **attestations**; verify ed25519 signatures over the receipt preimage (§7); aggregate by **count** and **voting power**. Wait until 2/3 quorum on both voting power and count.
-7. If quorum not reached (e.g., too few attestations), return error along with prepay reference for possible retry.
-8. Calculate `ttl = prepay_block_height.timestamp + retention_ttl`.
-9. Return `commitment, ttl` or error.
+1. **Bounds:** `0 < len(data) ≤ 128 MiB`.
+2. **Valset & height:** `vals, height := vt.CurrentSet(ctx)`. Set `creation_height = height`.
+3. **Encode:** choose `row_size` (×64 B), compute `commitment`, `rlc_orig`, and produce `rows[]`, `proofs[]` (K=4096, N=16384).
+4. **Construct & sign PaymentPromise (internally):** `{owner, ns(v2), blob_size=originalLength, commitment, row_version=1, creation_height}` + owner signature.
+5. **Assignment:** `assign := Assignment(commitment, valset@creation_height)`.
+6. **Upload (parallel per FSP, ≤ send\_workers):** send `UploadRowsRequest{chain_id, posted_block_height=creation_height, commitment, rlc_orig, rows subset+proofs, promise}`.
+7. **FSP validates** PP (escrow exists, sig valid, sufficient balance or returns **InsufficientBalanceProof**), verifies RLC/proofs & assignment, persists, and returns **validator\_signature** over the preimage (see §7).
+8. **Aggregate** signatures; verify ≥2/3 by count and power (valset\@creation\_height).
+9. **Pay:**
+
+    * **Put**: client submits `MsgPayForFibre{promise, validator_signatures}` via DFSP; return `PutResult + PFFConfirmation`.
+      * If DFSP fails (timeout, refusal), fallback to other FSPs in parallel until success or all fail.
+    * **PutWithoutPFF**: return `PutResult` (caller submits later).
 
 ### 5.2 Get()
 
-1. Obtain valset at the original `valsetHeight`.
-2. **Do we need to verify assignment?** Recompute **Assignment** (who holds which rows).
-3. Fetch from each assigned FSP in parallel (`read_workers`); 
-4. Verify each row’s **Merkle proof**; (optional per 2): ensure row indices match this FSP’s assignment slice.
-5. Reconstruct with rsema1d once enough rows are gathered to reach `originalLength`.
-6. Reconstruct **RLC**, verify encoding.
+1. If `creation_height==0`, fetch it from any FSP’s metadata for this commitment.
+2. Recompute `Assignment(commitment, valset@creation_height)`.
+3. Fetch assigned rows from each FSP in parallel (`read_workers`).
+4. Verify Merkle proofs; optional: enforce indices match assignment slice.
+5. Decode once enough rows for `originalLength` are gathered; recompute & verify **RLC**.
 
-### 5.3 Refresh() — **Pre-Payment resubmission**
+### 5.3 Refresh (no re‑upload)
 
-Optional; not required for v1.
-* Input: `commitment, PrepayRef` (no data).
-* Action: submit **new Pre-Payment** to extend retention TTL.
-* Output: `ttl` (new horizon) or error.
+1. Make a **new PP** for the **same commitment** with a **new creation\_height**; `posted_block_height := new creation_height`.
+2. Ask assigned FSPs for a **new validator signature** (no rows).
+3. Submit **`MsgPayForFibre{PP, new_signatures}`** to extend retention TTL.
+4. FSPs may extend TTL immediately upon verifying the PP, or upon observing the chain PayForFibre.
 
-### 5.4 Row size selection (informative)
+### 5.4 Insufficient funds — proofs & reconciliation
 
-```text
-Given len(data) and K=4096:
-row_size_raw = ceil(len(data) / K)
-row_size     = round_up_to_multiple(row_size_raw, 64B)
-row_size     = min(row_size, 32 KiB)             // cap to keep max_blob_size at 128 MiB
-Pad data to K * row_size and encode to N=16384 rows.
-```
+* If an FSP detects **insufficient available balance**, it **must** return **proof** instead of silently failing.
+* The client, upon receiving the proof, **updates** its cached balance/pending view and, if **AutoFund**, **deposits** to escrow before retrying.
 
-### 5.5 Assignment details (numbers)
+**Insufficient balance proof (server → client)**
 
-For `V = |valset|`, `n = N = 16384`:
+* **Semantics:** “With chain state at `proof_height`, `available_balance` is X; considering these **pending promises** (not yet processed), your effective availability is insufficient for the requested PP.”
+* **Contents (v1, baseline; more efficient proving TBD based pn payment spec):**
 
-```
-base = n // V
-r    = n % V
-rows_per_val ∈ { base, base+1 }
+    * `owner`, `chain_id`, `proof_height`.
+    * `available_balance` **+** `escrow_state_proof` (ICS23 or app‑specific state proof).
+    * `pending_promises[]`: the `PaymentPromise`s **from this owner** that the FSP signed and which are **not settled** (as observed by the FSP).
+      *Note:* absence proofs for `ProcessedPromise` entries may be costly; v1.2 treats this as **advisory** with best‑effort evidence. Efficient indexing/proving is **TBD**.
 
-Example: V=100 -> base=163, r=84
--> 84 validators get 164 rows, the remaining 16 get 163 rows.
-```
+### 5.5 Funding API (manual) — return proofs
+
+Each funding call **must** return:
+
+* `TxHash`, `InclusionHeight`, `InclusionProof`
+* `NewAvailableBalance`, `BalanceProofHeight`, `BalanceStateProof`
+
+Operations:
+
+* `CreateEscrow(initialDeposit)` → creates escrow + optional deposit.
+* `DepositToEscrow(amount)` → increases balance.
+* `RequestWithdrawal(amount)` → reserves amount; reduces `available_balance` immediately.
+* `ProcessWithdrawal(requestedAt)` → completes withdrawal after delay.
 
 ---
 
 ## 6) Wire APIs (protobuf)
 
-### 6.1 Bulk API (v1 default)
+### 6.1 Bulk API
 
 ```proto
-syntax = "proto3"; package fibre.v1;
+syntax = "proto3";
+package fibre.v1;
 
-message GF128 { bytes coeffs = 1; }          // len == 16
-message Commitment { bytes value = 1; }      // len == 32
-message RowWithProof { uint32 index = 1; bytes row = 2; bytes proof = 3; } // row len == row_size (per blob)
-message RlcOrig { repeated GF128 coeffs = 1; }
+message GF128 { bytes coeffs = 1; }                 // len == 16
+message Commitment { bytes value = 1; }             // len == 32
+message RowWithProof { uint32 index = 1; bytes row = 2; bytes proof = 3; }
+message RlcOrig { repeated GF128 coeffs = 1; }      // len == N = 16384
 
-message PrepayRef {
-  bytes tx_hash = 1;        // len == 32
-  uint64 block_height = 2;  // inclusion height
+// Copy reference x/fibre.PaymentPromise
+message PaymentPromise {
+  string owner = 1;        // bech32
+  bytes namespace = 2;     // MUST be version 2; 29 bytes raw
+  uint64 blob_size = 3;    // original length (pre-padding)
+  bytes commitment = 4;    // 32 bytes
+  uint32 row_version = 5;  // e.g., 1
+  int64 creation_height = 6;
+  bytes signature = 7;     // owner signature over PP sign-bytes
 }
 
-message StorageAttestation {
-  string chain_id = 1;
-  bytes signature = 2;               // ed25519 over domain-tagged digest (see §7)
+// Proof delivered when rejecting due to insufficient balance
+message InsufficientBalanceProof {
+  string owner = 1;
+  string chain_id = 2;
+  uint64 proof_height = 3;
+
+  string available_balance = 4;   // coin string
+  bytes  escrow_state_proof = 5;  // ICS23 or app-specific proof bytes
+
+  repeated PaymentPromise pending_promises = 6; // best-effort list (TBD: more efficient proving/indexing)
 }
 
 message UploadRowsRequest {
-  Commitment commitment = 1;
-  RlcOrig rlc_orig = 2;
-  repeated RowWithProof rows = 3;          // this FSP's assigned subset only
-  uint64 valset_height = 4;                // height used to fetch validator set
-  PrepayRef prepay = 5;                    // MUST be included
-  optional uint64 original_length = 10;    // can be used to verify padding
+  string chain_id = 1;                    // for validator signature preimage
+  uint64 posted_block_height = 2;         // MUST equal promise.creation_height in v1.2
+
+  Commitment commitment = 3;
+  RlcOrig rlc_orig = 4;
+  repeated RowWithProof rows = 5;         // this FSP's assigned subset only
+  PaymentPromise promise = 6;             // MUST be included
+  optional uint64 original_length = 10;   // optional sanity for padding checks
 }
 
+// Success or failure (insufficient funds). Servers SHOULD use gRPC error codes;
+// this message is provided for explicit success/failure channels in non-gRPC deployments.
 message UploadRowsResponse {
-  StorageAttestation attestation = 1;
-  optional uint32 backoff_ms = 10;         // server-advised cooldown under pressure
+  // Success path:
+  bytes validator_signature = 1;    // ed25519 over sha256("FIBRE/v1"||commitment||chain_id||be64(posted_block_height))
+  optional uint64 ttl_epoch_minute = 2;
+  optional uint32 backoff_ms = 10;
+
+  // Failure path (insufficient balance):
+  bool insufficient_balance = 20;
+  InsufficientBalanceProof insufficient_balance_proof = 21;
 }
 
 message GetRowsRequest {
@@ -236,9 +303,9 @@ message GetRowsRequest {
 }
 
 message GetRowsResponse {
-  repeated RowWithProof rows = 1;          // server returns all rows it holds for the commitment
-  optinal ttl = 2;                         // retention horizon (epoch minute)
-  optional uint32 backoff_ms = 10;         // server-advised cooldown under pressure
+  repeated RowWithProof rows = 1;    // server returns all rows it holds for the commitment
+  optional uint64 ttl_epoch_minute = 2;
+  optional uint32 backoff_ms = 10;
 }
 
 service Fibre {
@@ -247,258 +314,177 @@ service Fibre {
 }
 ```
 
-### 6.2 Streaming API (optional; for large per-FSP payloads)
+### 6.2 Streaming API (early rejection rationale)
+
+**Why streaming?** After the **`Init`** frame, the server can:
+
+* **Validate** `commitment` (e.g., dedup/existing).
+* **Validate** `PaymentPromise` (escrow, signature, already processed, balance).
+* **Reject early** (returning InsufficientBalanceProof if applicable) **before** reading heavy `Chunk` payloads.
 
 ```proto
-syntax = "proto3"; package fibre.v1;
+syntax = "proto3";
+package fibre.v1;
 
 message Init {
-  bytes commitment = 1;
-  uint64 total_chunks = 2;
-  uint64 total_bytes = 3;
-  uint64 valset_height = 4;
-  PrepayRef prepay = 5;
+  string chain_id = 1;
+  uint64 posted_block_height = 2;         // MUST equal promise.creation_height in v1.2
+  bytes commitment = 3;                    // 32 bytes
+  uint64 total_chunks = 4;
+  uint64 total_bytes = 5;
+  PaymentPromise promise = 6;
 }
+
 message Chunk  { uint32 index = 1; bytes data = 2; } // ≤ row_size per chunk
 message Finish { bytes sha256 = 1; }
 
 message UploadReq { oneof kind { Init init = 1; Chunk chunk = 2; Finish end = 3; } }
 
 message UploadResp {
-  StorageAttestation attestation = 1;
+  // Success:
+  bytes validator_signature = 1;
+  optional uint64 ttl_epoch_minute = 2;
+
+  // Failure:
+  bool insufficient_balance = 20;
+  InsufficientBalanceProof insufficient_balance_proof = 21;
 }
 
 service FibreStreaming { rpc Upload(stream UploadReq) returns (UploadResp); }
 ```
 
----
+### 6.3 Refresh API (optional)
 
-## 7) Attestations (sign/verify)
+```proto
+syntax = "proto3";
+package fibre.v1;
 
-**Preimage (v1)**
+message RefreshRequest {
+  string chain_id = 1;
+  uint64 posted_block_height = 2;       // == new PP.creation_height (v1.2)
 
-```
-sign_bytes = sha256(
-  "FIBRE/v1" ||
-  commitment ||
-  chain_id ||
-  be64(prepay_block_height) ||
-  prepay_tx_hash 
-)
-```
+  Commitment commitment = 3;
+  PaymentPromise promise = 4;           // new promise for same commitment
+}
 
-* Binds to network (`chain_id`)  and **expiry** based on pre-payment height.
+message RefreshResponse {
+  bytes validator_signature = 1;        // over the same preimage scheme
+  optional uint64 ttl_epoch_minute = 2;
+}
 
-**Server**
-
-* After verifying **Pre-Payment inclusion** and all row checks, set `expiry = now + retention_ttl`, compute `expiry_epoch_minute`, **sign**, and return.
-
-**Client**
-
-* Rebuild preimage; verify **ed25519** against validator consensus key from **valset\@height**; ensure `expiry_epoch_minute` is in the future.
-
----
-
-## 8) Server architecture
-
-### 8.1 Components
-
-* **Store**: **Badger** (v1). Alternatives deferred (§8.6).
-* **Fibre gRPC**: Bulk + (Optional: Streaming).
-* **Pre-Payment Verifier**: checks inclusion of `prepay_tx_hash` at `prepay_block_height` (Celestia).
-* **ValSet Service**: fetches **validator set at `valset_height`**.
-* **Rate limiter**: throughput cap and fairness.
-
-### 8.2 Badger layout 
-
-Keys:
-
-* `d/<commitment>` → this FSP’s **assigned rows** blob (big value; includes metadata such as `row_size`).
-* `b/<YYYYMMDDHHmm>/<commitment>` → minute bucket index for **retention**.
-
-**Store API**
-
-```go
-type Store interface {
-  Put(ctx context.Context, key [32]byte, value []byte, expiry time.Time) error
-  Get(ctx context.Context, key [32]byte) ([]byte, bool, error)
-  RunGC(ctx context.Context)
-  Close() error
+service FibreRefresh {
+  rpc Refresh(RefreshRequest) returns (RefreshResponse);
 }
 ```
 
-**GC**: sweep the current minute bucket; delete corresponding `d/*`; run Badger vlog GC opportunistically.
+---
 
-### 8.3 Upload verification pipeline (mandatory)
+## 7) Signatures & verification 
 
-1. **Pre-Payment inclusion**: verify `(prepay_tx_hash, prepay_block_height)` on-chain. Verify that `prepay_block_height.timestamp + retention_ttl > now`.
-2. Build **RLC** from `rlc_orig`. Verify correct encodind and proof of RLC.
-3. **Assignment check**: recompute **Assignment(commitment, valset\@valset\_height)**; ensure incoming row indices are exactly this validator’s slice (no extras/dupes).
-4. For each row: verify **Merkle proof** against `commitment` and encoding against **RLC** coefficients.
-5. Persist rows with `expiry = prepay_block_height.timestamp + retention_ttl` (write + sync).
-6. **Sign**  and return **attestation**.
+**Preimage for validator signatures (and server attestation):**
 
-### 8.4 Get pathway
+```
+digest = sha256(
+  "FIBRE/v1" ||
+  commitment (32B) ||
+  chain_id (utf-8) ||
+  be64(posted_block_height)   // v1: posted_block_height := PP.creation_height
+)
+sig = ed25519_sign(validator_consensus_key_at(PP.creation_height), digest)
+```
 
-* Accept `GetRowsRequest{commitment}`.
-* Recompute Assignment and confirm this server has a slice for `commitment`; return **all stored rows** for it.
+**On‑chain verification (`MsgPayForFibre`)**
 
-### 8.5 API limits & fairness
+* Valset used for power tally: **`PP.creation_height`**.
+* Each signature is verified against the above preimage with `posted_block_height = PP.creation_height` and the tx’s `chain_id`.
+* ≥ 2/3 voting power required.
 
-* Enforce `server_rows_per_message_limit` and maximum serialized request size.
-* **Rate-limit** ingress to **\~20 MiB/s** (configurable). With \~**163–164 × row\_size** bytes per request at V≈100, this yields \~**14–16 RPS** for 8 MiB blobs.
-* Include `backoff_ms` in responses to guide clients under pressure.
-* Optional: blacklist abusive clients by IP or signer.
-
-### 8.6 Storage roadmap
-
-* Start with Badger. Later: prototype **SQL-light** and **epoch-bucket** stores and pick by measured throughput and GC behavior.
 
 ---
 
-## 9) Security considerations
+## 8) Assignment (non‑overlapping; permutation‑based)
 
-* **Receipt domain** (`"FIBRE/v1"`) prevents cross-protocol replay.
-* **Chain binding**: `chain_id`, `prepay_block_height`,`prepay_tx_hash`  bind acceptance to a concrete chain state.
-* **Row verification** includes **RLC**, preventing malleability via valid-looking but undecodable rows.
-* **Non-overlapping assignment** removes ambiguity about which FSP should store which rows.
+Inputs: `seed = commitment`, `n = 16384`, validators `k = |valset@PP.creation_height|`.
+
+1. **Permute shares**: sort `i` by `SHA256("share" || seed || u32be(i))`.
+2. **Index validators** lexicographically by `PubKey` → indices `j=0..k-1`.
+3. **(OPTIONAL) Permute validators**: sort `j` by `SHA256("validator" || seed || u32be(j))`.
+4. `base = n // k`, `r = n % k`; first `r` in chosen validator order get `base+1`, others `base`.
+5. Walk permuted shares handing contiguous blocks to validators in that order.
+
+---
+
+## 9) Server architecture
+
+**Components**
+
+* Store: Badger (v1)
+* gRPC: Bulk + (+ optional Streaming) (+ optional Refresh)
+* PaymentPromise validator: `QueryValidatePaymentPromise(PP)`
+* ValSet service: `valset@PP.creation_height`
+* Rate limiter & fairness
+
+**Badger keys**
+
+* `d/<commitment>` → assigned rows blob (+ metadata: `row_size`, `original_length`, `creation_height`, `namespace`, `row_version`)
+* `b/<YYYYMMDDHHmm>/<commitment>` → retention bucket
+
+**Upload pipeline**
+
+1. Validate PP: `valid && sufficient_balance && !already_processed`.
+
+    * If **insufficient**, return **InsufficientBalanceProof**.
+2. Build RLC from `rlc_orig`; verify row proofs against `commitment`.
+3. Recompute Assignment; enforce indices match this validator’s slice.
+4. Persist rows with `expiry = now + retention_ttl`.
+5. Sign and return `validator_signature` (preimage in §7) + TTL hint if desired.
+6. Include `backoff_ms` under pressure.
+
+**Get pathway**
+
+* Return all stored rows for this validator’s slice; include TTL if desired.
 
 ---
 
 ## 10) Observability
 
-**Client metrics**: encode latency, **row\_size** chosen, upload latency per FSP, attestation verify failures, quorum time, prepay submit & inclusion latency/height.
+**Client metrics:** encode latency, chosen `row_size`, per‑FSP upload latency, signatures collected, quorum time, PayForFibre submit/inclusion, balance cache age, AutoFund events, reconciliation updates, insufficient‑proofs processed.
 
-**Server metrics**: RPS, bytes/s, assignment mismatches, proof verify failures, RLC failures, write time, GC sweep durations, attestation count, `backoff_ms` emissions, Badger vlog GC stats, prepay inclusion verification latency.
-
----
-
-## 12) Testing plan
-
-**Unit**: Assignment determinism given `(commitment, valset@height)`; RLC verification; attestation digest vectors; **row\_size rounding** (64 B multiple) with **K=4096**.
-
-**Integration**: end-to-end Put/Get/Refresh with N mock FSPs; prepay inclusion verification (happy & failure paths); assignment mismatch rejections; failure injection (missing rows, wrong proofs).
-
-**Load**: sustain ≥ 60 MiB/s writes across concurrent Puts with realistic `row_size` (e.g., 8–32 KiB), validate rate-limit behavior; verify GC keeps DB bounded.
-
-
-**Compatibility**: bulk ↔ streaming parity; client library mode vs light-node mode; Active vs Lazy ValTracker.
+**Server metrics:** RPS, bytes/s, assignment mismatches, proof/RLC failures, write latency, GC, validator\_sig count, `backoff_ms`, PP validation latency, insufficient‑proofs emitted.
 
 ---
 
-## 13) Reference helpers (non-normative)
+## 11) Testing plan
 
-### 13.1 Attestation helpers (Go)
+**Unit:** assignment determinism (with/without validator permutation), RLC, row\_size rounding, **signature preimage correctness**, PP sign‑bytes, insufficient‑proof encoding.
 
-```go
-const domain = "FIBRE/v1"
+**Integration:** end‑to‑end Put/Get/Refresh, PP validation happy/failure, balance reconciliation + AutoFund, streaming early‑reject, failure injection (missing rows, wrong proofs), quorum aggregation and on‑chain `MsgPayForFibre`.
 
-func Digest(
-  commitment [32]byte, chainID string, valsetHeight uint64,
-  prepayTxHash [32]byte, prepayBlockHeight uint64, prepayTxHash []byte,
-) [32]byte {
-  // sha256(domain || commitment || chainID ||  be64(prepayBlockHeight))
-}
-
-func VerifyEd25519(pub ed25519.PublicKey, sig []byte, d [32]byte) bool { /* ... */ }
-```
-
-### 13.2 Assignment (permutation idea; pseudocode)
-
-```go
-// Inputs: seed=commitment, n=total_rows=16384, valset (pubkeys), height
-shares := [0..n-1]
-sort(shares, by: sha256("share" || seed || u32be(i)))
-
-vals := indexValidatorsByPubKey(valset) // deterministic base indexing
-perm := [0..len(vals)-1]
-sort(perm, by: sha256("validator" || seed || u32be(j)))
-
-base := n / len(vals)
-r := n % len(vals)
-
-// Build mapping: validator perm[t] gets slice [offset, offset + size)
-offset := 0
-for t := 0; t < len(vals); t++ {
-  size := base
-  if t < r { size = base + 1 }
-  assignedShares := shares[offset : offset+size]
-  map[perm[t]] = assignedShares
-  offset += size
-}
-```
-
-### 13.3 Row size rounding
-
-* `row_size` is chosen per blob; **must be a multiple of 64 B**.
-* `row_size = round_up_64B( ceil(original_length / 4096) )`, then **cap at 32 KiB**.
+**Load:** ≥60 MiB/s writes with realistic `row_size` (8–32 KiB); verify backpressure behavior; bounded DB via GC.
 
 ---
 
-## 14) Lifecycle diagrams (ASCII)
-
-### 14.1 Upload (with Pre-Payment)
-
-```
-Client                 FSP (many)                 Chain
-  |  prepay submit   |                             |
-  |----------------->|                             |
-  |  wait inclusion  |                             |
-  |<-- height+hash --|                             |
-  |  encode+valset   |                             |
-  |----------------->|                             |
-  | UploadRows       |-- verify prepay incl. -->   |
-  | (bulk/stream)    |-- verify (proof+RLC) -->    |
-  |                  |-- check assignment -->      |
-  |                  |-- persist -> sign attn -->  |
-  |<----- attns -----|                             |
-  | aggregate 2/3    |                             |
-```
-
-### 14.2 Refresh (no re-upload)
-
-```
-Client                  Chain                 FSP
-  |--- Prepay --------> |                     |
-  |                     |                     |-- (update expiry) -->|
-  |<-- inclusion ------ |                     |
-  |                     |                     |
-```
-
----
-
-## 15) Bulk vs Streaming trade-off (explicit)
-
-* **Bulk** is simpler and remains default.
-* If `rows_per_val × row_size` approaches multi-MiB per request (e.g., V≈100 & `row_size=32 KiB` → \~5.2 MiB), consider **Streaming** (`Init → Chunk → Finish`) for progressive verification/backpressure.
-* Both APIs **coexist**; server may signal preferred mode via error or `backoff_ms`.
-
----
-
-## 16) Configuration (suggested defaults)
+## 12) Suggested defaults
 
 ```toml
 [row]
-# Originals and totals
-original_count = 4096                 # 2^12 originals (K)
-encoding_factor = "1:3"               # parity = 3 × originals
-total_count = 16384                   # derived: original_count * 4
-
-# Row size is chosen per blob; must be a multiple of 64 bytes.
-min_size = 64                         # bytes
-max_size = 32768                      # 32 KiB (keeps max_blob_size at 128 MiB)
+original_count = 4096
+encoding_factor = "1:3"
+total_count = 16384
+min_size = 64
+max_size = 32768
 
 [client]
 send_workers = 20
 read_workers = 20
-mode = "library"                      # or "light-node"
-valtracker = "lazy"                   # or "active"
+mode = "library"
+valtracker = "lazy"
+auto_pay = true
+auto_fund = false     # opt-in
 
 [server]
-retention_ttl = "24h"                 # time to live; no promotion
-rows_per_message_limit = 165          # e.g., ceil(16384 / 100) + 1
-throughput_cap_bytes_per_sec = 10485760  # 10 MiB/s
-
-[payment]
-confirmations_required = 0            # adjust if you want extra safety
+retention_ttl = "24h"
+rows_per_message_limit = 165
+throughput_cap_bytes_per_sec = 10485760
 ```
+
