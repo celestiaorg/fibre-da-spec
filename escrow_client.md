@@ -6,7 +6,7 @@ A thin library that:
 
 * Manages **escrow state** for an owner (balance bootstrap, proofs, reconciliation).
 * **Builds & signs PaymentPromise (PP)** sign-bytes.
-* Provides a **Funding API** (create/deposit/withdraw/process) with **tx inclusion proof + balance state proof** returns.
+* Provides a **Funding API** (create/deposit/withdraw/process) that returns **tx inclusion proof + balance state proof**.
 * **Submits PayForFibre** (PFF) using a single **Default FSP (DFSP)** as a relay (or falls back to direct chain).
 
 > This client is independent of data upload/rows/assignment. FibreDA code calls into it.
