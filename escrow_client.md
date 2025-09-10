@@ -193,4 +193,3 @@ message InsufficientBalanceProof {
 * **Escrow Client** talks to **Escrow Server (DFSP)** first, and the **chain** as fallback.
 * **FibreDA servers** (not part of escrow) still **gate uploads** with `QueryValidatePaymentPromise` and may emit `InsufficientBalanceProof`—the **Escrow Client** knows how to consume that proof and update its cache.
 
-If you want, I can splice these sections straight into your spec (right before “FibreDA — Full Specification v1.2”) or ship a tiny **patch/diff** that inserts them and cross-links only where necessary.
