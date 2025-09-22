@@ -28,14 +28,14 @@ The module maintains a simple key-value store where:
 
 ## State
 
-The `x/fibre` module stores the following data:
+The `x/valaddr` module stores the following data:
 
 ### FibreProviderInfo
 
 ```protobuf
 message FibreProviderInfo {
-  // ip_addresses are the IP addresses where users can access the fibre service (max 5 addresses)
-  repeated string ip_addresses = 1;
+  // ip_address is the IP address where users can access the fibre service
+  string ip_address = 1;
 }
 ```
 
@@ -51,32 +51,25 @@ Allows a validator to set or update their fibre provider information.
 
 ```protobuf
 message MsgSetFibreProviderInfo {
-  // ip_addresses are the IP addresses for the fibre service (max 5 addresses, each ≤ 90 characters)
-  repeated string ip_addresses = 1;
+  string signer = 1; 
+  // ip_address is the IP addresses for the fibre service provider (max 90 characters)
+  string ip_address = 2;
 }
 ```
 
 **Validation Rules:**
-- `validator_address` must be a valid validator consensus address
-- `ip_addresses` must contain 1-5 non-empty addresses, each ≤ 90 characters
-- Signer must match the validator operator address for the matching consensus validator address
-- Validator must be in the active set
 
-### MsgRemoveFibreProviderInfo
+- `signer` must be a valid validator consensus operator address
+- `ip_address` must be less than 90 characters and must no error with `net.ParseIP(ip_address)` should not return nil
 
-Allows removal of fibre provider information for validators not in the active set.
+If the `signer` is currently jailed, this will attempt to unjail them
 
-```protobuf
-message MsgRemoveFibreProviderInfo {
-  // validator_consensus_address is the consensus address of the validator to remove
-  string validator_consensus_address = 1;
-}
-```
+## Failure to provide fibre info
 
-**Validation Rules:**
-- `validator_consensus_address` must be a valid validator consensus address
-- Validator must NOT be in the active set
-- Provider info must exist for the validator
+While the network can not enforce that every validator is running an available fibre DA server, it can enforce that all validators
+in the active set have supplied an IP address. To do this, the network employs the `AfterValidatorBonded` hook in the staking module for any validator that gets added to the active set. If no info is provided, the validator is jailed. For active validators, at height **missing_info_check_height**, aimed at 1 week after the upgrade height, in `EndBlock` all active validators will be checked for missing info, those that have not supplied info will be jailed.
+
+To bypass the usage `MsgUnjail`, jailing will be for 1 year from the current blocktime. To unjail, a validator must submit the `MsgSetFibreProviderInfo` only then will the `JailedUntil` be updated and `Unjail` called.
 
 ## Events
 
@@ -88,23 +81,39 @@ Emitted when a validator sets or updates their fibre provider information.
 message EventSetFibreProviderInfo {
   // validator_consensus_address is the consensus address of the validator
   string validator_consensus_address = 1;
-  // ip_addresses are the IP addresses for the fibre service
-  repeated string ip_addresses = 2;
-}
-```
-
-### EventRemoveFibreProviderInfo
-
-Emitted when fibre provider information is removed.
-
-```protobuf
-message EventRemoveFibreProviderInfo {
-  // validator_address is the consensus address of the validator
-  string validator_consensus_address = 1;
+  // ip_address is the IP addresses for the fibre service provider
+  string ip_address = 2;
 }
 ```
 
 ## Queries
+
+The module supports two types of queries. The first one is aimed for new fibre clients to build their address book. The second
+is to request the info for specific providers when a) they are added to the validator set or b) they are unreachable and thus the address may have changed.
+
+### QueryAllActiveFibreProviders
+
+Query fibre provider information for all validators in the active set.
+
+**Request:**
+```protobuf
+message QueryAllActiveFibreProvidersRequest {}
+```
+
+**Response:**
+```protobuf
+message QueryAllActiveFibreProvidersResponse {
+  // providers contains all active fibre providers
+  repeated FibreProvider providers = 1;
+}
+
+message FibreProvider {
+  // validator_consensus_address is the consensus address of the validator
+  string validator_consensus_address = 1;
+  // info contains the fibre provider information
+  FibreProviderInfo info = 2;
+}
+```
 
 ### QueryFibreProviderInfo
 
@@ -128,65 +137,13 @@ message QueryFibreProviderInfoResponse {
 }
 ```
 
-### QueryAllActiveFibreProviders
-
-Query fibre provider information for all validators in the active set.
-
-**Request:**
-```protobuf
-message QueryAllActiveFibreProvidersRequest {}
-```
-
-**Response:**
-```protobuf
-message QueryAllActiveFibreProvidersResponse {
-  // providers contains all active fibre providers
-  repeated ActiveFibreProvider providers = 1;
-}
-
-message ActiveFibreProvider {
-  // validator_consensus_address is the consensus address of the validator
-  string validator_consensus_address = 1;
-  // info contains the fibre provider information
-  FibreProviderInfo info = 2;
-}
-```
-
 ## Parameters
 
-The `x/fibre` module currently defines no parameters. All validation rules are hardcoded.
+The `x/valaddr` has the following parameter. These can only be adjusted in hard-fork upgrades
+
+- **missing_info_check_height** [int64]: when to check for validators with missing info. This acts as a grace period and can be dynamically set in the migration. (default: **100,000** - this is roughly 1 week from the upgrade height)
 
 ## Client
-
-### Query Client
-
-To create a query client for the fibre module:
-
-```go
-import (
-    "context"
-    "google.golang.org/grpc"
-    fibretypes "github.com/celestiaorg/celestia-app/x/fibre/types"
-)
-
-func NewFibreQueryClient(conn *grpc.ClientConn) fibretypes.QueryClient {
-    return fibretypes.NewQueryClient(conn)
-}
-
-// Query specific validator info
-func QueryValidatorInfo(ctx context.Context, client fibretypes.QueryClient, valAddr string) (*fibretypes.QueryFibreProviderInfoResponse, error) {
-    req := &fibretypes.QueryFibreProviderInfoRequest{
-        ValidatorConsensusAddress: valAddr,
-    }
-    return client.FibreProviderInfo(ctx, req)
-}
-
-// Query all active providers
-func QueryAllActiveProviders(ctx context.Context, client fibretypes.QueryClient) (*fibretypes.QueryAllActiveFibreProvidersResponse, error) {
-    req := &fibretypes.QueryAllActiveFibreProvidersRequest{}
-    return client.AllActiveFibreProviders(ctx, req)
-}
-```
 
 ### CLI Commands
 
@@ -196,14 +153,11 @@ func QueryAllActiveProviders(ctx context.Context, client fibretypes.QueryClient)
 celestia-appd query fibre provider <validator-consensus-address>
 
 # Query all active fibre providers
-celestia-appd query fibre active-providers
+celestia-appd query fibre providers <num-providers>
 ```
 
 **Transaction Commands:**
 ```bash
 # Set fibre provider info (must be signed by validator)
-celestia-appd tx fibre set-provider-info <ip-address1,ip-address2,...> --from <validator-operator-key>
-
-# Remove fibre provider info (can be signed by anyone if validator is not active)
-celestia-appd tx fibre remove-provider-info <validator-address> --from <remover-key>
+celestia-appd tx fibre set-provider-ip <ip-address> --from <validator-operator-key>
 ```
