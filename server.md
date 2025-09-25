@@ -89,9 +89,11 @@ service PaymentProcessor {
 
 **Flow (normative):**
 
-1. **Validate PP (stateless):**
+1. **Validate stateless:**
 
+    * msg size ≤ 8 MiB (enforced by max gRPC message size), TODO: update based on latest params 
     * size bounds: `0 < blob_size ≤ 128 MiB` (derived from params),
+    * row inclusion proof size matches `original_rows` size (network level params)
     * `signer` bech32, `namespace` version=2 and 29 bytes,
     * `commitment` 32 bytes,
     * `row_version == 1`,
@@ -99,12 +101,17 @@ service PaymentProcessor {
     * `valset_height > 0`,
     * `signature` present.
 
-2. **Idempotency checks:**
+2. **Proof/encoding checks:**
+
+   * Verify RLC and Merkle proofs for provided `rows` against `commitment` and `rlc_orig`.
+   * On failure: `INVALID_ARGUMENT` (ErrInvalidEncoding). **Note:** PP remains in unprocessed; timeout may still charge.
+
+3. **Idempotency checks:**
 
     * **Query** PP in **processed** index. If found → **OK** (return `validator_signature`)
     * **Put** PP found in **unprocessed** index. If found already → **OK** (return `validator_signature`)
 
-3. **Stateful PP validation (payments module):**
+4. **Stateful PP validation (payments module):**
 
     * Call `ValidatePaymentPromise`:
 
@@ -113,11 +120,6 @@ service PaymentProcessor {
         * signer signature valid,
         * not processed.
     * On failure: return `FAILED_PRECONDITION` (ErrInvalidPaymentPromise or ErrInsufficientBalance). With machine-readable detail code.
-
-4. **Proof/encoding checks:**
-
-    * Verify RLC and Merkle proofs for provided `rows` against `commitment` and `rlc_orig`.
-    * On failure: `INVALID_ARGUMENT` (ErrInvalidEncoding). **Note:** PP remains in unprocessed; timeout may still charge.
 
 5. **Assignment check:**
 
