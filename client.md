@@ -84,10 +84,10 @@ QueryEscrowAccount(ctx context.Context, signer string) (balance sdk.Coin, err er
 Deposit(ctx context.Context, signer string, amount sdk.Coin) (balance sdk.Coin, error)
 
 // Mirrors: FibreAccount.Withdraw
-Withdraw(ctx context.Context, signer string, amount sdk.Coin) (balance sdk.Coin, error)
+Withdraw(ctx context.Context, signer string, amount sdk.Coin) (*PendingWithdrawal, error)
 
 // Mirrors: FibreAccount.PendingWithdrawals
-PendingWithdrawals(ctx context.Context, signer string) (*PendingWithdrawalsResponse, error)
+PendingWithdrawals(ctx context.Context, signer string) ([]PendingWithdrawal, error)
 }
 ```
 
