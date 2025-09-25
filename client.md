@@ -12,11 +12,11 @@ The client library can be constructed in two modes:
 2. Connected to a full node or a light node via RPC. This mode will query the node for headers and validator sets as needed.
 
 ```go
-// Light‑node backed (embedded light client for headers/valsets)
-NewClientWithLightNode(cfg LightNodeConfig, vtMode ValTrackerMode, opts ...Option) (*Client, error)
+// Light‑node sub-module (embedded into light client as module. Uses light nodes header module to track valsets)
+NewFibdreDAModule(cfg ModuleConfig, vtMode ValTrackerMode, opts ...Option) (*Client, error)
 
 // RPC‑backed (fetch headers/valsets via RPC)
-NewClientWithRPC(cfg NodeRPCConfig, vtMode ValTrackerMode, opts ...Option) (*Client, error)
+NewFibdreDAClient(cfg ClientConfig, vtMode ValTrackerMode, opts ...Option) (*Client, error)
 ```
 
 **Key config**
