@@ -159,7 +159,7 @@ Validators sign the PP domain to attest service for the data:
 
 ```
 SignBytes = SHA256(
-  "fibre/pp:v1" || ChainID ||
+  "fibre/pp:v1" || Chain_id ||
   signer_bytes || namespace ||
   blob_size_u32be || commitment ||
   row_version_u32be || creation_timestamp_pb || valset_height_u64be
@@ -250,7 +250,7 @@ SignBytes = SHA256(
 
 * **PP keys**
 
-    * `pp/unprocessed/h/<promise_hash>` → metadata (signer, creation\_timestamp, valset\_height, gas\_bound, …)
+    * `pp/unprocessed/h/<promise_hash>` → PP metadata without user signature (signer, creation\_timestamp, valset\_height, gas\_bound, …)
     * `pp/unprocessed/b/<YYYYMMDDHHmm>/<promise_hash>` → TTL bucket index
     * `pp/processed/h/<promise_hash>` → processed\_at (Timestamp)
     * `pp/processed/b/<YYYYMMDDHHmm>/<promise_hash>` → TTL bucket index
@@ -302,7 +302,7 @@ TODO: `rows_per_message_limit` should be derived at runtime from the **actual** 
 ## 5) Rate-Limit & DoS Controls
 
 * **Admission control**: check message sizes against `rows_per_message_limit` and effective `row_size`.
-* **Per-peer/total** token buckets with refill tied to `throughput_cap_bytes_per_sec`.
+* **Per-client/total** token buckets with refill tied to `throughput_cap_bytes_per_sec`.
 * **Burst caps**: bound outstanding inflight bytes and RPCs per peer.
 * **Backoff hints**: include `backoff_ms` in responses; prefer exponential backoff with jitter on clients.
 * **Server enforced keepalive policy**: close idle connections after a timeout (e.g., 2m).

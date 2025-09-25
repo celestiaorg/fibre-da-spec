@@ -44,6 +44,7 @@ NewFibdreDAClient(cfg ClientConfig, vtMode ValTrackerMode, opts ...Option) (*Cli
 ## 2) Public API
 
 ```go
+// Mirror from go-square
 type Namespace struct {
   Version uint8  // MUST be 2
   Bytes   [29]byte
@@ -63,9 +64,21 @@ type PutResult struct {
 
 type Client interface {
   // Builds PP internally, uploads, aggregates sigs, submits MsgPayForFibre.
+	// Errors:
+	//`ErrInvalidNamespace`: namespace is not version 2 or not 29 bytes.
+    //`ErrOversizeBlob`: data exceeds 128 MiB.
+    //`ErrInsufficientBalance` from FSP: not enough balance; client should not retry without increasing balance of escrow account. Response should include current balance and state proofs.
+    //`ErrNotEnoughSignatures`: not enough FSPs responded with valid signatures. Error will specify if power or count threshold was not met. Should include the number of valid signatures received.
+    //`ErrPFFSubmission`: submission of MsgPayForFibre failed (all FSPs).
+    //`Ctx` errors: timeouts, cancellations.
   Put(ctx context.Context, ns Namespace, data []byte) (PutResult, error)
 
   // Retrieves and reconstructs data by commitment.
+    // Errors: 
+    // `ErrCommitmentNotFound`: no FSP had any rows for the commitment.
+     // `ErrNotEnoughRows`: not enough rows were retrieved to reconstruct the original data.
+     // `ErrRLCMismatch`: RLC computed from retrieved rows does not match the commitment.
+     // `Ctx` errors: timeouts, cancellations.
   Get(ctx context.Context, ns Namespace, commitment [32]byte) ([]byte, error)
   
   // Access to escrow account management API.
@@ -78,34 +91,22 @@ type Client interface {
 // AccountClient provides access to the DFSP's FibreAccount gRPC service.
 type AccountClient interface {
 // Mirrors: FibreAccount.QueryEscrowAccount
-QueryEscrowAccount(ctx context.Context, signer string) (balance sdk.Coin, err error)
+// Queries the escrow account for `signer`. Returns current & available balance.	
+QueryEscrowAccount(ctx context.Context, signer string) (curr_balance,avail_balance uint64,  err error)
 
 // Mirrors: FibreAccount.Deposit
-Deposit(ctx context.Context, signer string, amount sdk.Coin) (balance sdk.Coin, error)
+// Deposits `amount` into the escrow account for `signer`. Returns new balance after deposit.
+Deposit(ctx context.Context, signer string, amount sdk.Coin) (balance uint64, error)
 
 // Mirrors: FibreAccount.Withdraw
+// Requests a withdrawal of `amount` from the escrow account for `signer`. 
 Withdraw(ctx context.Context, signer string, amount sdk.Coin) (*PendingWithdrawal, error)
 
 // Mirrors: FibreAccount.PendingWithdrawals
+// Lists pending withdrawals for `signer`.
 PendingWithdrawals(ctx context.Context, signer string) ([]PendingWithdrawal, error)
 }
 ```
-
-**Errors**
-
-Put:
-* `ErrInvalidNamespace`: namespace is not version 2 or not 29 bytes.
-* `ErrOversizeBlob`: data exceeds 128 MiB.
-* `ErrInsufficientBalanceProof` from FSP: not enough balance; client should not retry without increasing balance of escrow account.
-* `ErrNotEnoughSignatures`: not enough FSPs responded with valid signatures. Error will specify if power or count threshold was not met. Should include the number of valid signatures received.
-* `ErrPFFSubmission`: submission of MsgPayForFibre failed (all FSPs).
-* `Ctx` errors: timeouts, cancellations.
-
-Get:
-* `ErrCommitmentNotFound`: no FSP had any rows for the commitment.
-* `ErrNotEnoughRows`: not enough rows were retrieved to reconstruct the original data.
-* `ErrRLCMismatch`: RLC computed from retrieved rows does not match the commitment.
-* `Ctx` errors: timeouts, cancellations.
 
 ## 3) Sign‑bytes for validator signatures
 
@@ -113,7 +114,7 @@ Validator signatures are over the PP preimage + ChainID domain tag. APIs use `go
 
 ```
 SignBytes = SHA256(
-  "fibre/pp:v1" || ChainID || signer_bytes || namespace ||
+  "fibre/pp:v1" || Chain_id || signer_bytes || namespace ||
   blob_size_u32be || commitment || row_version_u32be ||
   creation_timestamp_pb || valset_height_u64be
 )
@@ -147,9 +148,10 @@ type ValTracker interface {
 }
 
 type Validator struct {
-  Address     [20]byte // raw address
-  PubKey      []byte   // ed25519 pubkey bytes
-  VotingPower int64
+    Address     Address      // Address is hex bytes. From Tendermint heeader
+    PubKey      crypto.PubKey 
+    VotingPower int64         
+    FSPAddr     net.IP // FSP IP address
 }
 ```
 
@@ -177,10 +179,11 @@ type Validator struct {
 
 ### Get()
 
-1. Get Valset: `vals, _ := vt.CurrentSet(ctx)`.
+1. Get Valset: `vals, _ := vt.CurrentSet(ctx)`. 
+   - This could be a different validator set to the the validator set that actually has the shares. It probably won't be problematic because the validator sets will likely have a high degree of overlap and the erasure coding ensures enough redundancy
 2. Send `GetRowsRequest{commitment}` to FSPs in parallel (≤ `read_workers`).
-3. Collect `GetRowsResponse{rows[], rlc_orig}` from FSPs; Verify merkle proofs against `commitment`.
-4. Decode data once amount of collected rows > `original_rows`; recompute & verify **RLC**.
+3. Collect `GetRowsResponse{rows[], rlc_orig_coefs}` from each FSP in parallel; Where rlc_orig_coefs should match only returned rows and have inclusion proofs. Verify all merkle proofs against `commitment`.
+4. Decode data once amount of collected rows > `original_rows`; cancel remaining ongoing requests. recompute & verify **RLC**.
 5. Return `data` or error.
 
 
