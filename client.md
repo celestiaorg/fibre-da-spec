@@ -37,7 +37,7 @@ NewFibdreDAClient(cfg ClientConfig, vtMode ValTrackerMode, opts ...Option) (*Cli
 * **ShardMap** — Assignment implementation.
 * **FSP Conns** — pooled gRPC clients (Fibre, FibreAccount, PaymentProcessor).
   * **FibreClient**: UploadRows, GetRows.
-* **DFSP Conn** — preferred relay for `MsgPayForFibre` and escrow queries.
+* **DFSP Conn** — preferred consensus endpoint(s) for `MsgPayForFibre` and escrow queries.
   * **FibrePaymentsClient**: SubmitPayForFibre
   * **FibreAccountClient**: escrow account balance, deposit, withdraw
 
