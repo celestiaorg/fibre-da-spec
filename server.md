@@ -108,7 +108,6 @@ service PaymentProcessor {
 
 3. **Idempotency checks:**
 
-    * **Query** PP in **processed** index. If found → **OK** (return `validator_signature`)
     * **Put** PP found in **unprocessed** index. If found already → **OK** (return `validator_signature`)
 
 4. **Stateful PP validation (payments module):**
@@ -130,7 +129,6 @@ service PaymentProcessor {
 6. **Persist rows (single horizon):**
 
     * Store under `(commitment, valset_height)` with TTL=`retention_ttl` (24h),
-    * Metadata: `row_size`, `original_length`, `creation_timestamp`, `namespace`, `row_version`, `valset_height`.
     * **Multiple PPs for the same commitment:** store rows per PP (per `valset_height`).
 
 7. **Return validator signature:**
@@ -192,8 +190,7 @@ SignBytes = SHA256(
 
     * Two logical indexes:
 
-        * **Unprocessed**: PPs seen but not finalized on-chain.
-        * **Processed**: PPs that were charged via `MsgPayForFibre` or `MsgPaymentTimeout`.
+        * **Unprocessed**: PPs seen but not finalized on-chain. Cleanup  via `MsgPayForFibre` or `MsgPaymentTimeout`. 
     * Responsibilities:
 
         * Idempotency checks (first-seen vs. duplicates).
@@ -205,11 +202,10 @@ SignBytes = SHA256(
     * Persists `(commitment, valset_height)` buckets with:
 
         * Assigned rows + `rlc_orig`,
-        * Metadata: PP fields: `row_size`, `original_length`, `creation_timestamp`, `namespace`, `row_version` etc.
     * TTL GC based on `retention_ttl` (24h).
     * **Badger layout (v1):**
 
-        * `d/<commitment>/<valset_height>` → rows blob + metadata
+        * `d/<commitment>/<valset_height>` → rows blob
         * `b/<YYYYMMDDHHmm>/<commitment>/<valset_height>` → retention buckets
 
 4. **ValidatorTracker**
@@ -252,13 +248,11 @@ SignBytes = SHA256(
 
     * `pp/unprocessed/h/<promise_hash>` → PP metadata without user signature (signer, creation\_timestamp, valset\_height, gas\_bound, …)
     * `pp/unprocessed/b/<YYYYMMDDHHmm>/<promise_hash>` → TTL bucket index
-    * `pp/processed/h/<promise_hash>` → processed\_at (Timestamp)
-    * `pp/processed/b/<YYYYMMDDHHmm>/<promise_hash>` → TTL bucket index
 
 
 * **Commitment data**
 
-    * `d/<commitment>/<valset_height>` → rows blob, rlc\_orig, metadata
+    * `d/<commitment>/<valset_height>` → rows blob, rlc\_orig
     * `b/<YYYYMMDDHHmm>/<commitment>/<valset_height>` → TTL bucket index
 
 **Note:** `promise_hash = SHA256( PaymentPromise (canonical bytes) )`.
