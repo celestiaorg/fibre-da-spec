@@ -16,7 +16,7 @@ message RlcOrig { repeated GF128 coeffs = 1; }            // len == N
 // Mirrors x/fibre.PaymentPromise (names unified, Timestamp used)
 message PaymentPromise {
   string signer = 1;                                      // bech32 escrow owner
-  bytes namespace = 2;                                    // MUST be version 2; 29 raw bytes
+  bytes namespace = 2;                                    // 29 raw bytes
   uint32 blob_size = 3;                                   // original length (pre-padding)
   bytes commitment = 4;                                   // 32 bytes
   uint32 row_version = 5;                                 // = 1
