@@ -272,6 +272,19 @@ message PaymentPromise {f
   // signature is the escrow owner's signature over the sign bytes
   bytes signature = 8;
 }
+
+message HistoricalStateProof {
+  tendermint.types.SignedHeader signed_header = 1;
+  tendermint.types.ValidatorSet validator_set = 2;
+  StateInclusionProof state_proof = 3;
+}
+
+message StateInclusionProof {
+  bytes key = 1;
+  bytes value = 2;
+  tendermint.crypto.ProofOps proof = 3;
+  int64 height = 4;
+}
 ```
 
 #### PaymentPromise Validation
@@ -303,6 +316,29 @@ Gas cost is calculated as described in the [Gas Consumption](#gas-consumption) s
 3. Verify sufficient available balance for gas cost (see [Gas Consumption](#gas-consumption) section). This includes all yet to be processed `PaymentPromises` that the validator has signed over.
 4. Verify promise hasn't been processed already
 5. Validators query historical info at `promise.height` to determine validator set order, derive assigned data chunks based on position, and validate those chunks (off-chain)
+
+**Stateless Validation (Off-Chain)**:
+
+Validators can verify payment promises off-chain without querying celestia-app by using cryptographic proofs. The client provides a `HistoricalStateProof` at `promise.height` containing the validator set and escrow account balance.
+
+1. Client sends to validator:
+   - Data chunks
+   - Signed `PaymentPromise`
+   - `HistoricalStateProof` at `promise.height`
+
+2. Validator verifies the historical state proof against their trusted head (from light client):
+   - Call `VerifyHistoricalStateProof(proof, trustedHead, trustedVals)` which performs:
+     - `VerifyCommitLight()`: Verify 2/3+ validator signatures on historical header
+     - `VerifyValidatorSetChange()`: Verify <1/3 validator set change from trusted head
+     - `VerifyMembership()`: Verify IAVL proof that escrow account state exists at `promise.height` with sufficient balance
+
+3. Extract validator set from `proof.validator_set` to determine validator ordering and assigned data chunks
+
+4. Validate assigned data chunks against the commitment
+
+If verification succeeds, validators sign the commitment without needing access to celestia-app.
+
+**Libraries**: `github.com/cometbft/cometbft/types`, `github.com/cosmos/ics23/go`
 
 #### Sign Bytes Format
 
@@ -421,13 +457,10 @@ sequenceDiagram
 
     Note over C,A: Promise Creation & Data Distribution
     C->>C: Create signed PaymentPromise
-    C->>S: Send data chunks + PaymentPromise
+    C->>S: Send data chunks + PaymentPromise + HistoricalStateProof
 
     Note over S,A: Validator Verification
-    S->>A: QueryValidatePaymentPromise(promise, signature)
-    A-->>S: ValidationResponse (valid, balance check, etc.)
-    S->>A: Query historical info for validator set at promise.height
-    A-->>S: Return validator set order
+    S->>S: Verify HistoricalStateProof against trusted head
     S->>S: Validate assigned data chunks
 
     alt Promise and data chunks are valid
@@ -464,9 +497,9 @@ sequenceDiagram
 
 2. **Promise Creation**: User creates a signed [`PaymentPromise`](#msgpayforfibre) containing escrow details, commitment, validator set height, and creation timestamp.
 
-3. **Data Distribution Phase**: User distributes data chunks to validators along with the signed promise.
+3. **Data Distribution Phase**: User distributes data chunks to validators along with the signed promise and a `HistoricalStateProof` at `promise.height`.
 
-4. **Validator Verification**: Validators query the celestia-app instance using [`QueryValidatePaymentPromise`](#validatepaymentpromise) to verify the promise signature, check escrow has sufficient funds, and confirm the promise hasn't been processed. Upon validation, validators query the staking module's historical info at `promise.height` to retrieve the ordered validator set. Using their position in this set, validators determine which data chunks they are assigned to validate. Validators then perform validation on their assigned chunks. If both the promise and chunk validation succeed, validators sign the commitment.
+4. **Validator Verification**: Validators verify the `HistoricalStateProof` against their trusted head (from light client) to cryptographically confirm the escrow account has sufficient funds and obtain the validator set at `promise.height`. Using their position in the verified validator set, validators determine which data chunks they are assigned to validate. Validators then perform validation on their assigned chunks. If both the proof and chunk validation succeed, validators sign the commitment. No queries to celestia-app are needed.
 
 5. **Payment Confirmation (Happy Path)**: User collects 2/3+ validator signatures and submits [`MsgPayForFibre`](#msgpayforfibre) containing the promise and signatures. The commitment gets included in the data square.
 
