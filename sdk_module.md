@@ -302,6 +302,7 @@ Gas cost is calculated as described in the [Gas Consumption](#gas-consumption) s
 2. Verify escrow account exists for `signer`
 3. Verify sufficient available balance for gas cost (see [Gas Consumption](#gas-consumption) section). This includes all yet to be processed `PaymentPromises` that the validator has signed over.
 4. Verify promise hasn't been processed already
+5. Validators query historical info at `promise.height` to determine validator set order, derive assigned data chunks based on position, and validate those chunks (off-chain)
 
 #### Sign Bytes Format
 
@@ -425,11 +426,14 @@ sequenceDiagram
     Note over S,A: Validator Verification
     S->>A: QueryValidatePaymentPromise(promise, signature)
     A-->>S: ValidationResponse (valid, balance check, etc.)
+    S->>A: Query historical info for validator set at promise.height
+    A-->>S: Return validator set order
+    S->>S: Validate assigned data chunks
 
-    alt Promise is valid
+    alt Promise and data chunks are valid
         S->>S: Sign commitment
         S-->>C: Return validator signature
-    else Promise is invalid
+    else Promise or data chunks are invalid
         S-->>C: Reject request
     end
 
@@ -462,7 +466,7 @@ sequenceDiagram
 
 3. **Data Distribution Phase**: User distributes data chunks to validators along with the signed promise.
 
-4. **Validator Verification**: Validators query the celestia-app instance using [`QueryValidatePaymentPromise`](#validatepaymentpromise) to verify the promise signature, check escrow has sufficient funds, and confirm the promise hasn't been processed. If valid, validators sign over the commitment.
+4. **Validator Verification**: Validators query the celestia-app instance using [`QueryValidatePaymentPromise`](#validatepaymentpromise) to verify the promise signature, check escrow has sufficient funds, and confirm the promise hasn't been processed. Upon validation, validators query the staking module's historical info at `promise.height` to retrieve the ordered validator set. Using their position in this set, validators determine which data chunks they are assigned to validate. Validators then perform validation on their assigned chunks. If both the promise and chunk validation succeed, validators sign the commitment.
 
 5. **Payment Confirmation (Happy Path)**: User collects 2/3+ validator signatures and submits [`MsgPayForFibre`](#msgpayforfibre) containing the promise and signatures. The commitment gets included in the data square.
 
