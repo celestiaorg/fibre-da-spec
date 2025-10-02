@@ -499,8 +499,7 @@ sequenceDiagram
 
 3. **Data Distribution Phase**: User distributes data chunks to validators along with the signed promise and a `HistoricalStateProof` at `promise.height`.
 
-4. **Validator Verification**: Validators verify the `HistoricalStateProof` against their trusted head (from light client) to cryptographically confirm the escrow account has sufficient funds and obtain the validator set at `promise.height`. Using their position in the verified validator set, validators determine which data chunks they are assigned to validate. Validators then perform validation on their assigned chunks. If both the proof and chunk validation succeed, validators sign the commitment. No queries to celestia-app are needed.
-
+4. **Validator Verification**: Validators verify the `HistoricalStateProof` against their trusted head (from light client) to cryptographically confirm the escrow account has sufficient funds and obtain the validator set at `promise.height`. Using their position in the verified validator set, validators determine which data chunks they are assigned to validate. Validators then perform validation on their assigned chunks. If both the proof and chunk validation succeed, validators sign the commitment.
 5. **Payment Confirmation (Happy Path)**: User collects 2/3+ validator signatures and submits [`MsgPayForFibre`](#msgpayforfibre) containing the promise and signatures. The commitment gets included in the data square.
 
 6. **Timeout Processing (Fallback)**: If user doesn't submit [`MsgPayForFibre`](#msgpayforfibre) within `promise_timeout_blocks`, anyone can submit [`MsgPaymentTimeout`](#msgpaymenttimeout) to process payment. This prevents the user from getting free service.
