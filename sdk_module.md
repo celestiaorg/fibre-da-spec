@@ -286,6 +286,7 @@ message PaymentPromise {f
 - `height` must be positive
 - `creation_timestamp` must be positive
 - `signature` must be properly formatted and non-empty
+- Verify promise signature by escrow owner over promise sign bytes (see [Sign Bytes Format](#sign-bytes-format) below)
 
 **Gas Consumption**:
 
@@ -300,8 +301,7 @@ Gas cost is calculated as described in the [Gas Consumption](#gas-consumption) s
 
 2. Verify escrow account exists for `signer`
 3. Verify sufficient available balance for gas cost (see [Gas Consumption](#gas-consumption) section). This includes all yet to be processed `PaymentPromises` that the validator has signed over.
-4. Verify promise signature by escrow owner over promise sign bytes (see [Sign Bytes Format](#sign-bytes-format) below)
-5. Verify promise hasn't been processed already
+4. Verify promise hasn't been processed already
 
 #### Sign Bytes Format
 
