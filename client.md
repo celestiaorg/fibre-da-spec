@@ -1,3 +1,5 @@
+# Fibre Client
+
 ## 0) Glossary
 
 * **FSP**: validator‑operated Fibre Service Provider.
