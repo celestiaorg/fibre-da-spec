@@ -2,7 +2,7 @@
 
 ## Abstract
 
-The `x/valaddr` module enables validators in the active set to register their fibre service provider information.
+The `x/valaddr` module enables validators to register their fibre service provider information.
 
 ## Contents
 
@@ -23,6 +23,7 @@ Every validator in the active set is a Fibre Service Provider (FSP). Each FSP re
 ### State Management
 
 The module maintains a simple key-value store where:
+
 - **Key**: Validator consensus address (celestiavalcons...)
 - **Value**: FibreProviderInfo struct containing service details
 
@@ -52,22 +53,22 @@ Allows a validator to set or update their fibre provider information.
 ```protobuf
 message MsgSetFibreProviderInfo {
   string signer = 1; 
-  // ip_address is the IP addresses for the fibre service provider (max 90 characters)
-  string ip_address = 2;
+  // host is the network address for the fibre service provider (max 90 characters)
+  string host = 2;
 }
 ```
 
 **Validation Rules:**
 
 - `signer` must be a valid validator consensus operator address
-- `ip_address` must be less than 90 characters and must no error with `net.ParseIP(ip_address)` should not return nil
+- `host` must be less than 90 characters
 
 If the `signer` is currently jailed, this will attempt to unjail them
 
 ## Failure to provide fibre info
 
 While the network can not enforce that every validator is running an available fibre DA server, it can enforce that all validators
-in the active set have supplied an IP address. To do this, the network employs the `AfterValidatorBonded` hook in the staking module for any validator that gets added to the active set. If no info is provided, the validator is jailed. For active validators, at height **missing_info_check_height**, aimed at 1 week after the upgrade height, in `EndBlock` all active validators will be checked for missing info, those that have not supplied info will be jailed.
+in the active set have supplied an IP address. To do this, the network employs the `AfterValidatorBonded` hook in the staking module for any validator that gets added to the active set. If no info is provided, the validator is jailed. For existing active validators, at height **missing_info_check_height**, aimed at 1 week after the upgrade height, in `EndBlock` all active validators will be checked for missing info, those that have not supplied info will be jailed.
 
 To bypass the usage `MsgUnjail`, jailing will be for 1 year from the current blocktime. To unjail, a validator must submit the `MsgSetFibreProviderInfo` only then will the `JailedUntil` be updated and `Unjail` called.
 
@@ -96,11 +97,13 @@ is to request the info for specific providers when a) they are added to the vali
 Query fibre provider information for all validators in the active set.
 
 **Request:**
+
 ```protobuf
 message QueryAllActiveFibreProvidersRequest {}
 ```
 
 **Response:**
+
 ```protobuf
 message QueryAllActiveFibreProvidersResponse {
   // providers contains all active fibre providers
@@ -120,6 +123,7 @@ message FibreProvider {
 Query fibre provider information for a specific validator.
 
 **Request:**
+
 ```protobuf
 message QueryFibreProviderInfoRequest {
   // validator_consensus_address is the consensus address of the validator
@@ -128,6 +132,7 @@ message QueryFibreProviderInfoRequest {
 ```
 
 **Response:**
+
 ```protobuf
 message QueryFibreProviderInfoResponse {
   // info contains the fibre provider information
@@ -148,6 +153,7 @@ The `x/valaddr` has the following parameter. These can only be adjusted in hard-
 ### CLI Commands
 
 **Query Commands:**
+
 ```bash
 # Query specific validator's fibre info
 celestia-appd query fibre provider <validator-consensus-address>
@@ -157,7 +163,8 @@ celestia-appd query fibre providers <num-providers>
 ```
 
 **Transaction Commands:**
+
 ```bash
 # Set fibre provider info (must be signed by validator)
-celestia-appd tx fibre set-provider-ip <ip-address> --from <validator-operator-key>
+celestia-appd tx fibre set-host <host-address> --from <validator-operator-key>
 ```
